@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>2.3.5.RELEASE</version>
+        <relativePath/> <!-- lookup parent from repository -->
+    </parent>
+    <groupId>ae.sahabss</groupId>
+    <artifactId>ecmservice</artifactId>
+    <version>V1.0</version>
+    <packaging>war</packaging>
+    <name>ECMService</name>
+    <description>Digital Sharjah ECM Service project for content management</description>
+    <properties>
+        <java.version>1.8</java.version>
+        <log4j2.version>2.17.1</log4j2.version>
+    </properties>
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-tomcat</artifactId>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>commons-codec</groupId>
+            <artifactId>commons-codec</artifactId>
+            <version>1.10</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jpa</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.oracle.database.jdbc</groupId>
+            <artifactId>ojdbc8</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+<!--       <dependency>
+           <groupId>oracle.ucm.ridc</groupId>
+           <artifactId>oraclUCM</artifactId>
+           <version>11.1.1</version>
+       </dependency>-->
+
+        <dependency>
+            <groupId>oracle.ucm.ridc</groupId>
+            <artifactId>oraclUCM</artifactId>
+            <version>11.1.1</version>
+            <scope>system</scope>
+            <systemPath>${project.basedir}/src/main/libs/oraclUCM-11.1.1.jar</systemPath>
+        </dependency>
+
+
+        <dependency>
+            <groupId>org.apache.tika</groupId>
+            <artifactId>tika-core</artifactId>
+            <version>2.9.2</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.tika</groupId>
+            <artifactId>tika-parsers-standard-package</artifactId>
+            <version>2.9.2</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-war-plugin</artifactId>
+                <version>3.3.2</version>
+                <configuration>
+                    <webResources>
+                        <resource>
+                            <directory>${project.basedir}/src/main/libs</directory>
+                            <targetPath>WEB-INF/lib</targetPath>
+                            <includes>
+                                <include>oraclUCM-11.1.1.jar</include>
+                            </includes>
+                        </resource>
+                    </webResources>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+
+
+</project>

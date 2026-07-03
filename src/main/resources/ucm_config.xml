@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="windows-1256" ?>
+<UCMServer xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+           xmlns="http://www.proc.com/ucm">
+    <!--Local-->
+<!--      <remoteClient>-->
+<!--        <username>DSWCC</username>-->
+<!--        <password>XXXXX</password>-->
+<!--        <url>idc://10.32.46.143:4444</url>-->
+<!--      </remoteClient>-->
+
+    <!--STG-->
+<!--          <remoteClient>-->
+<!--            <username>DSWCC</username>-->
+<!--            <password>XXXXX</password>-->
+<!--            <url>idc://localhost:4444</url>-->
+<!--          </remoteClient>-->
+
+  <!--PROD-->
+  <remoteClient>
+    <username>weblogic</username>
+    <password>XXXXX</password>
+    <url>idc://10.32.26.181:4444</url>
+  </remoteClient>
+
+  <!--PROD-->
+<!--    <remoteClient>-->
+<!--      <username>DSWCC</username>-->
+<!--      <password>XXXXX</password>-->
+<!--        <url>idc://localhost:4444</url>-->
+<!--    &lt;!&ndash;      <url>idc://10.32.26.181:4444</url>&ndash;&gt;-->
+<!--    </remoteClient>-->
+
+</UCMServer>
