@@ -8,7 +8,6 @@ import java.text.ParseException;
 import java.text.SimpleDateFormat;
 
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -35,134 +34,163 @@ import oracle.stellent.ridc.model.TransferFile;
 import oracle.stellent.ridc.protocol.ServiceException;
 import oracle.stellent.ridc.protocol.ServiceResponse;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.xml.sax.Attributes;
 import org.xml.sax.SAXException;
 import org.xml.sax.helpers.DefaultHandler;
 
 
+/**
+ * UCM (Oracle WebCenter Content) gateway.
+ *
+ * Thread-safety: this class is a singleton Spring bean used concurrently by all requests.
+ * All per-call state (DataBinder, ServiceResponse) is kept in local variables — never in
+ * instance fields — so concurrent requests cannot clobber each other's state.
+ * The only shared mutable field is the authenticated {@link IdcContext}, which is volatile
+ * and written under synchronization in {@link #login(String, String)}.
+ */
 @Service
 public class UCMUtilities implements IContent {
+
+    private static final Logger logger = LoggerFactory.getLogger(UCMUtilities.class);
+
     private static String url;
     private static String username;
     private static String password;
-    private IdcClient idcClient;
-    private ServiceResponse response;
-    private DataBinder serverBinder;
-    private IdcContext userContext;
-    
+    private final IdcClient idcClient;
+    private volatile IdcContext userContext;
+
     static {
         try {
             initializeUCM();
         } catch (ConfigurationException e) {
-            e.printStackTrace();
+            logger.error("Failed to initialize UCM configuration", e);
         }
     }
 
     public UCMUtilities() throws IdcClientException {
-        this(url,username, password);        
+        this(url, username, password);
     }
 
 
-    public UCMUtilities(String url,String username, String password) throws IdcClientException {
+    public UCMUtilities(String url, String username, String password) throws IdcClientException {
         UCMUtilities.url = url;
         UCMUtilities.username = username;
         UCMUtilities.password = password;
         IdcClientManager manager = new IdcClientManager();
-        //String url = protocol + "://" + serverHostname + ":" + serverPort;
         idcClient = manager.createClient(url);
     }
 
+    /**
+     * Authenticates against UCM and caches the resulting context.
+     *
+     * The admin credentials are fixed per deployment, so once a context has been validated
+     * for the given username there is no need to repeat the PING_SERVER round-trip on
+     * every request — this saves one network hop per upload/download.
+     */
     public void login(String username, String password) throws UCMLoginException {
-        DataBinder dataBinder = null;
-        try {
-            userContext = new IdcContext(username, password);
-            dataBinder = idcClient.createBinder();
-            dataBinder.putLocal("IdcService", "PING_SERVER");
-            response = idcClient.sendRequest(userContext, dataBinder);
-            serverBinder = response.getResponseAsBinder();
-        } catch (IdcClientException e) {
-            e.printStackTrace();
-            throw new UCMLoginException();
+        IdcContext existingContext = this.userContext;
+        if (existingContext != null && existingContext.getUser() != null
+                && existingContext.getUser().equals(username)) {
+            return;
+        }
+        synchronized (this) {
+            existingContext = this.userContext;
+            if (existingContext != null && existingContext.getUser() != null
+                    && existingContext.getUser().equals(username)) {
+                return;
+            }
+            try {
+                IdcContext newContext = new IdcContext(username, password);
+                DataBinder dataBinder = idcClient.createBinder();
+                dataBinder.putLocal("IdcService", "PING_SERVER");
+                ServiceResponse response = idcClient.sendRequest(newContext, dataBinder);
+                try {
+                    response.getResponseAsBinder();
+                } finally {
+                    response.close();
+                }
+                this.userContext = newContext;
+            } catch (IdcClientException e) {
+                logger.error("UCM login failed for user {}", username, e);
+                throw new UCMLoginException();
+            }
         }
     }
 
     public void login(String username) {
-        //        System.out.println("*********************************************************************");
-        //        System.out.println("In UCM Login");
-        DataBinder dataBinder = null;
         try {
-            userContext = new IdcContext(username);
-            dataBinder = idcClient.createBinder();
+            IdcContext newContext = new IdcContext(username);
+            DataBinder dataBinder = idcClient.createBinder();
             dataBinder.putLocal("IdcService", "PING_SERVER");
-            response = idcClient.sendRequest(userContext, dataBinder);
-            serverBinder = response.getResponseAsBinder();
+            ServiceResponse response = idcClient.sendRequest(newContext, dataBinder);
+            try {
+                response.getResponseAsBinder();
+            } finally {
+                response.close();
+            }
+            this.userContext = newContext;
         } catch (IdcClientException e) {
-            e.printStackTrace();
+            logger.error("UCM login failed for user {}", username, e);
         }
     }
-    
+
     public void login() {
-        DataBinder dataBinder = null;
         try {
-            userContext = new IdcContext(username, password);
-            dataBinder = idcClient.createBinder();
-            dataBinder.putLocal("IdcService", "PING_SERVER");
-            response = idcClient.sendRequest(userContext, dataBinder);
-            serverBinder = response.getResponseAsBinder();
-        } catch (IdcClientException e) {
-            e.printStackTrace();
+            login(username, password);
+        } catch (UCMLoginException e) {
+            logger.error("UCM login failed for configured user", e);
         }
     }
 
     public String upload(String contentId, String contentType, String filename, InputStream inputStream,
                          Map<String, Object> customAttributes) throws CheckInException, IOException, Exception {
-        return checkInDocument(resolveDocName(contentType,contentId), contentType + " for " + contentId, contentType, "DSharjahGroup", inputStream,
+        return checkInDocument(resolveDocName(contentType, contentId), contentType + " for " + contentId, contentType, "DSharjahGroup", inputStream,
                                filename, customAttributes);
     }
 
     public UCMDocument getDocumentInfo(String contentId) {
-        UCMDocument document = null;
-        DataBinder dataBinder = null;
         try {
-            String docName = contentId;
-            dataBinder = idcClient.createBinder();
+            DataBinder dataBinder = idcClient.createBinder();
             dataBinder.putLocal("IdcService", "DOC_INFO_BY_NAME");
-            dataBinder.putLocal("dDocName", docName);
-            response = idcClient.sendRequest(userContext, dataBinder);
-            DataObject documentInfo = response.getResponseAsBinder()
-                                              .getResultSet("DOC_INFO")
-                                              .getRows()
-                                              .get(0);
-            if (documentInfo == null)
-                return null;
-            Date checkedInDate = null;
-            String format = response.getResponseAsBinder()
-                                    .getLocal("blDateFormat")
-                                    .split("!")[0];
-            checkedInDate = resolveDate(format, documentInfo.get("dInDate").toString());
-            // All document information keys
-            //            for (String s: documentInfo.keySet()) {
-            //                System.out.println(s);
-            //            }
-            document = new UCMDocument();
-            document.setDId(documentInfo.get("dID"));
-            document.setAuthor(documentInfo.get("dDocAuthor"));
-            document.setDocName(documentInfo.get("dDocName"));
-            document.setCheckInDate(checkedInDate);
-            document.setTitle(documentInfo.get("dDocTitle"));
-            document.setRevesionId(documentInfo.get("dRevisionID"));
-            document.setFormat(documentInfo.get("dFormat"));
-            document.setFilename(documentInfo.get("dOriginalName"));
-            document.setDocUrl(response.getResponseAsBinder().getLocal("DocUrl"));
-            document.setContentType(documentInfo.get("dDocType"));
+            dataBinder.putLocal("dDocName", contentId);
+            ServiceResponse response = idcClient.sendRequest(userContext, dataBinder);
+            try {
+                DataBinder responseBinder = response.getResponseAsBinder();
+                DataObject documentInfo = responseBinder.getResultSet("DOC_INFO")
+                                                        .getRows()
+                                                        .get(0);
+                if (documentInfo == null)
+                    return null;
+                String format = responseBinder.getLocal("blDateFormat")
+                                              .split("!")[0];
+                Date checkedInDate = resolveDate(format, documentInfo.get("dInDate").toString());
+                UCMDocument document = new UCMDocument();
+                document.setDId(documentInfo.get("dID"));
+                document.setAuthor(documentInfo.get("dDocAuthor"));
+                document.setDocName(documentInfo.get("dDocName"));
+                document.setCheckInDate(checkedInDate);
+                document.setTitle(documentInfo.get("dDocTitle"));
+                document.setRevesionId(documentInfo.get("dRevisionID"));
+                document.setFormat(documentInfo.get("dFormat"));
+                document.setFilename(documentInfo.get("dOriginalName"));
+                document.setDocUrl(responseBinder.getLocal("DocUrl"));
+                document.setContentType(documentInfo.get("dDocType"));
+                return document;
+            } finally {
+                response.close();
+            }
         } catch (IdcClientException e) {
             if (e instanceof ServiceException) {
                 return null;
             }
+            logger.error("Failed to fetch document info for {}", contentId, e);
+            return null;
         }
-        return document;
     }
+
     public String uploadReturnDID(String contentId, String contentType, String filename, InputStream inputStream,
                                   Map<String, Object> customAttributes) throws CheckInException, IOException,
             Exception {
@@ -179,117 +207,120 @@ public class UCMUtilities implements IContent {
     }
 
     public void deleteContent(String contentId) {
-        DataBinder dataBinder = null;
-        dataBinder = idcClient.createBinder();
+        DataBinder dataBinder = idcClient.createBinder();
         dataBinder.putLocal("IdcService", "DELETE_DOC");
-        // Document ID
-        // dataBinder.putLocal("dID", myId);
-        // Document Name
         dataBinder.putLocal("dDocName", contentId);
         try {
-            response = idcClient.sendRequest(userContext, dataBinder);
+            ServiceResponse response = idcClient.sendRequest(userContext, dataBinder);
+            try {
+                response.getResponseAsBinder();
+            } finally {
+                response.close();
+            }
+            logger.debug("File {} deleted successfully", contentId);
         } catch (IdcClientException e) {
-            e.printStackTrace();
+            logger.error("Failed to delete content {}", contentId, e);
         }
-        System.out.println("File deleted successfully");
     }
 
     public void deleteContentByDID(String dID) {
-        DataBinder dataBinder = null;
-        dataBinder = idcClient.createBinder();
+        DataBinder dataBinder = idcClient.createBinder();
         dataBinder.putLocal("IdcService", "DELETE_DOC");
-        // Document ID
         dataBinder.putLocal("dID", dID);
         try {
-            response = idcClient.sendRequest(userContext, dataBinder);
+            ServiceResponse response = idcClient.sendRequest(userContext, dataBinder);
+            try {
+                response.getResponseAsBinder();
+            } finally {
+                response.close();
+            }
+            logger.debug("File with dID {} deleted successfully", dID);
         } catch (IdcClientException e) {
-            e.printStackTrace();
+            logger.error("Failed to delete content by dID {}", dID, e);
         }
-        System.out.println("File deleted successfully");
     }
 
     //EDIT_RENDITIONS
 
     public List<Map<String, String>> getDocumentAttachments(String dId) throws IdcClientException {
-        DataBinder dataBinder = null;
-        dataBinder = idcClient.createBinder();
+        DataBinder dataBinder = idcClient.createBinder();
         dataBinder.putLocal("IdcService", "EDIT_RENDITIONS_FORM");
         dataBinder.putLocal("dID", dId);
-        //dataBinder.putLocal("IsAttachment", "1");
         try {
-            response = idcClient.sendRequest(userContext, dataBinder);
-            DataResultSet dataResultSet = response.getResponseAsBinder().getResultSet("manifest");
-            ArrayList<Map<String, String>> attachments = new ArrayList<Map<String, String>>();
-            for (DataObject dataObject : dataResultSet.getRows()) {
-                Map<String, String> attachment = new HashMap<String, String>();
-                attachment.put("name", dataObject.get("extRenditionName"));
-                attachment.put("description", dataObject.get("extRenditionDescription"));
-                attachments.add(attachment);
+            ServiceResponse response = idcClient.sendRequest(userContext, dataBinder);
+            try {
+                DataResultSet dataResultSet = response.getResponseAsBinder().getResultSet("manifest");
+                List<Map<String, String>> attachments = new ArrayList<Map<String, String>>();
+                for (DataObject dataObject : dataResultSet.getRows()) {
+                    Map<String, String> attachment = new HashMap<String, String>();
+                    attachment.put("name", dataObject.get("extRenditionName"));
+                    attachment.put("description", dataObject.get("extRenditionDescription"));
+                    attachments.add(attachment);
+                }
+                return attachments;
+            } finally {
+                response.close();
             }
-            return attachments;
         } catch (IdcClientException e) {
-            e.printStackTrace();
+            logger.error("Failed to fetch attachments for dID {}", dId, e);
             return null;
         }
     }
 
     public void addAttachment() {
-        DataBinder dataBinder = null;
-        dataBinder = idcClient.createBinder();
+        DataBinder dataBinder = idcClient.createBinder();
         dataBinder.getLocalData();
         dataBinder.putLocal("IdcService", "EDIT_RENDITIONS_FORM");
         dataBinder.putLocal("extRenditionName", "3407");
         dataBinder.putLocal("extRenditionDescription", "3407");
         try {
-            response = idcClient.sendRequest(userContext, dataBinder);
-            response.getHeaderNames();
+            ServiceResponse response = idcClient.sendRequest(userContext, dataBinder);
+            try {
+                response.getHeaderNames();
+            } finally {
+                response.close();
+            }
         } catch (IdcClientException e) {
-            e.printStackTrace();
+            logger.error("Failed to add attachment", e);
         }
     }
 
     public UCMDocument getDocumentInfoById(String dId) {
-        UCMDocument document = null;
-        DataBinder dataBinder = null;
         try {
-            dataBinder = idcClient.createBinder();
+            DataBinder dataBinder = idcClient.createBinder();
             dataBinder.putLocal("IdcService", "DOC_INFO");
             dataBinder.putLocal("dID", dId);
-            response = idcClient.sendRequest(userContext, dataBinder);
-            DataObject documentInfo = response.getResponseAsBinder()
-                                              .getResultSet("DOC_INFO")
-                                              .getRows()
-                                              .get(0);
-            if (documentInfo == null)
-                return null;
-            Date checkedInDate = null;
-            String format = response.getResponseAsBinder()
-                                    .getLocal("blDateFormat")
-                                    .split("!")[0];
-            checkedInDate = resolveDate(format, documentInfo.get("dInDate").toString());
-            // All document information keys
-            //            for (String s: documentInfo.keySet()) {
-            //                System.out.println(s);
-            //            }
-            
-            document = new UCMDocument();
-            document.populateDocument(documentInfo);
-            document.setCheckInDate(checkedInDate);
-            document.setDocUrl(response.getResponseAsBinder().getLocal("DocUrl"));
+            ServiceResponse response = idcClient.sendRequest(userContext, dataBinder);
+            try {
+                DataBinder responseBinder = response.getResponseAsBinder();
+                DataObject documentInfo = responseBinder.getResultSet("DOC_INFO")
+                                                        .getRows()
+                                                        .get(0);
+                if (documentInfo == null)
+                    return null;
+                String format = responseBinder.getLocal("blDateFormat")
+                                              .split("!")[0];
+                Date checkedInDate = resolveDate(format, documentInfo.get("dInDate").toString());
+
+                UCMDocument document = new UCMDocument();
+                document.populateDocument(documentInfo);
+                document.setCheckInDate(checkedInDate);
+                document.setDocUrl(responseBinder.getLocal("DocUrl"));
+                return document;
+            } finally {
+                response.close();
+            }
         } catch (IdcClientException e) {
-            System.out.println(e);
             if (e instanceof ServiceException) {
                 return null;
             }
+            logger.error("Failed to fetch document info for dID {}", dId, e);
+            return null;
         }
-        return document;
     }
 
     public InputStream download(String contentId) {
-        //String docName = resolveDocName(contentType, contentId);
-        System.out.println("*************************************");
-        System.out.println("Content Id = " + contentId);
-        System.out.println("***************************************");
+        logger.debug("Downloading content id {}", contentId);
         return getDocumentFile(contentId);
     }
 
@@ -300,10 +331,10 @@ public class UCMUtilities implements IContent {
             binder.putLocal("dID", dId);
             binder.putLocal("allowInterrupt", "1");
             binder.putLocal("Rendition", "Primary");
-            response = idcClient.sendRequest(this.userContext, binder);
+            ServiceResponse response = idcClient.sendRequest(this.userContext, binder);
             return response.getResponseStream();
         } catch (IdcClientException e) {
-            e.printStackTrace();
+            logger.error("Failed to download file by dID {}", dId, e);
         }
         return null;
     }
@@ -311,65 +342,63 @@ public class UCMUtilities implements IContent {
     public List<UCMDocument> getRevisions(String contentType, String contentId) {
         String docName = resolveDocName(contentType, contentId);
         List<UCMDocument> documents = new ArrayList<UCMDocument>();
-        DataBinder dataBinder = null;
         try {
-            dataBinder = idcClient.createBinder();
+            DataBinder dataBinder = idcClient.createBinder();
             dataBinder.putLocal("IdcService", "DOC_INFO_BY_NAME");
             dataBinder.putLocal("dDocName", docName);
-            response = idcClient.sendRequest(userContext, dataBinder);
-            serverBinder = response.getResponseAsBinder();
-            //System.out.println(serverBinder);
-            DataResultSet dataResultSet = serverBinder.getResultSet("REVISION_HISTORY");
-            String format = response.getResponseAsBinder()
-                                    .getLocal("blDateFormat")
-                                    .split("!")[0];
-            // loop over the results
-            UCMDocument document = null;
-            for (DataObject dataObject : dataResultSet.getRows()) {
-                document = new UCMDocument();
-                Date date = resolveDate(format, dataObject.get("dInDate"));
-                document.setDId(dataObject.get("dID"));
-                document.setRevesionId(dataObject.get("dRevisionID"));
-                document.setCheckInDate(date);
-                document.setFormat(dataObject.get("dFormat"));
-                document.setDocName(dataObject.get("dDocName"));
-                documents.add(document);
+            ServiceResponse response = idcClient.sendRequest(userContext, dataBinder);
+            try {
+                DataBinder responseBinder = response.getResponseAsBinder();
+                DataResultSet dataResultSet = responseBinder.getResultSet("REVISION_HISTORY");
+                String format = responseBinder.getLocal("blDateFormat")
+                                              .split("!")[0];
+                for (DataObject dataObject : dataResultSet.getRows()) {
+                    UCMDocument document = new UCMDocument();
+                    Date date = resolveDate(format, dataObject.get("dInDate"));
+                    document.setDId(dataObject.get("dID"));
+                    document.setRevesionId(dataObject.get("dRevisionID"));
+                    document.setCheckInDate(date);
+                    document.setFormat(dataObject.get("dFormat"));
+                    document.setDocName(dataObject.get("dDocName"));
+                    documents.add(document);
+                }
+            } finally {
+                response.close();
             }
         } catch (IdcClientException e) {
-            e.printStackTrace();
+            logger.error("Failed to fetch revisions for {}", docName, e);
         }
         return documents;
     }
-    
+
     public List<UCMDocument> getRevisions(String dId) {
         List<UCMDocument> documents = new ArrayList<UCMDocument>();
-        DataBinder dataBinder = null;
         try {
-            dataBinder = idcClient.createBinder();
+            DataBinder dataBinder = idcClient.createBinder();
             dataBinder.putLocal("IdcService", "DOC_INFO");
             dataBinder.putLocal("dID", dId);
-            response = idcClient.sendRequest(userContext, dataBinder);
-            serverBinder = response.getResponseAsBinder();
-            //System.out.println(serverBinder);
-            DataResultSet dataResultSet = serverBinder.getResultSet("REVISION_HISTORY");
-            String format = response.getResponseAsBinder()
-                                    .getLocal("blDateFormat")
-                                    .split("!")[0];
-            // loop over the results
-            UCMDocument document = null;
-            for (DataObject dataObject : dataResultSet.getRows()) {
-                document = new UCMDocument();
-                Date date = resolveDate(format, dataObject.get("dInDate"));
-                document.setDId(dataObject.get("dID"));
-                document.setRevesionId(dataObject.get("dRevisionID"));
-                document.setRevesionLable(dataObject.get("dRevLabel"));
-                document.setCheckInDate(date);
-                document.setFormat(dataObject.get("dFormat"));
-                document.setDocName(dataObject.get("dDocName"));
-                documents.add(document);
+            ServiceResponse response = idcClient.sendRequest(userContext, dataBinder);
+            try {
+                DataBinder responseBinder = response.getResponseAsBinder();
+                DataResultSet dataResultSet = responseBinder.getResultSet("REVISION_HISTORY");
+                String format = responseBinder.getLocal("blDateFormat")
+                                              .split("!")[0];
+                for (DataObject dataObject : dataResultSet.getRows()) {
+                    UCMDocument document = new UCMDocument();
+                    Date date = resolveDate(format, dataObject.get("dInDate"));
+                    document.setDId(dataObject.get("dID"));
+                    document.setRevesionId(dataObject.get("dRevisionID"));
+                    document.setRevesionLable(dataObject.get("dRevLabel"));
+                    document.setCheckInDate(date);
+                    document.setFormat(dataObject.get("dFormat"));
+                    document.setDocName(dataObject.get("dDocName"));
+                    documents.add(document);
+                }
+            } finally {
+                response.close();
             }
         } catch (IdcClientException e) {
-            e.printStackTrace();
+            logger.error("Failed to fetch revisions for dID {}", dId, e);
         }
         return documents;
     }
@@ -377,9 +406,8 @@ public class UCMUtilities implements IContent {
     public String checkInDocumentReturnDID(String documentName, String documentTitle, String documentType,
                                            String securityGroup, InputStream primaryFile, String documentFileName,
                                            Map<String, Object> customMetadata) throws IOException, Exception {
-        DataBinder dataBinder = null;
         try {
-            dataBinder = idcClient.createBinder();
+            DataBinder dataBinder = idcClient.createBinder();
             dataBinder.putLocal("IdcService", "CHECKIN_UNIVERSAL");
             dataBinder.putLocal("dDocTitle", documentTitle);
             if (documentName != null && documentName.length() > 0) {
@@ -397,29 +425,23 @@ public class UCMUtilities implements IContent {
             if (customMetadata != null) {
                 for (String s : customMetadata.keySet()) {
                     if (!s.equals("dDocTitle") && !s.equals("dSecurityGroup") && !s.equals("dDocType")) {
-                        System.out.println(s + " "+ String.valueOf(customMetadata.get(s)));
+                        logger.debug("Custom metadata {} = {}", s, customMetadata.get(s));
                         dataBinder.putLocal(s, String.valueOf(customMetadata.get(s)));
                     }
                 }
             }
-            response = idcClient.sendRequest(this.userContext, dataBinder);
-            System.out.println(dataBinder.getLocalData().toString());
-            DataBinder responseBinder = response.getResponseAsBinder();
-            Collection<String> did = responseBinder.getResultSetNames();
-            //            System.out.println(" File checked in and document ID= :" + responseBinder.getLocalData().get("dID"));
-            //            System.out.println(" File checked in and document ID= :" + responseBinder.getLocal("dDocName"));
-            return responseBinder.getLocalData().get("dID");
+            ServiceResponse response = idcClient.sendRequest(this.userContext, dataBinder);
+            try {
+                DataBinder responseBinder = response.getResponseAsBinder();
+                return responseBinder.getLocalData().get("dID");
+            } finally {
+                response.close();
+            }
         } catch (IdcClientException e) {
-            System.out.println("*******************************************************************************************************************");
-            System.out.println("IDC");
-            System.out.println("*******************************************************************************************************************");
-            e.printStackTrace();
+            logger.error("UCM check-in failed for document {}", documentName, e);
             throw e;
         } catch (IOException e) {
-            System.out.println("*******************************************************************************************************************");
-            System.out.println("IO");
-            System.out.println("*******************************************************************************************************************");
-            e.printStackTrace();
+            logger.error("IO error during check-in of document {}", documentName, e);
             throw e;
         }
     }
@@ -429,9 +451,8 @@ public class UCMUtilities implements IContent {
                                                              InputStream primaryFile, String documentFileName,
                                                              Map<String, Object> customMetadata) throws IOException,
                                                                                                         Exception {
-        DataBinder dataBinder = null;
         try {
-            dataBinder = idcClient.createBinder();
+            DataBinder dataBinder = idcClient.createBinder();
             dataBinder.putLocal("IdcService", "CHECKIN_UNIVERSAL");
             dataBinder.putLocal("dDocTitle", documentTitle);
             if (documentName != null && documentName.length() > 0) {
@@ -448,38 +469,39 @@ public class UCMUtilities implements IContent {
                     }
                 }
             }
-            response = idcClient.sendRequest(this.userContext, dataBinder);
-            DataBinder responseBinder = response.getResponseAsBinder();
             Map<String, String> docInfo = new HashMap<String, String>();
-            docInfo.put("DID", responseBinder.getLocalData().get("dID"));
-            System.out.println("------------------DID------BEFOR URL---------");
+            ServiceResponse checkInResponse = idcClient.sendRequest(this.userContext, dataBinder);
+            try {
+                DataBinder responseBinder = checkInResponse.getResponseAsBinder();
+                docInfo.put("DID", responseBinder.getLocalData().get("dID"));
+            } finally {
+                checkInResponse.close();
+            }
             // Get Doc Info
             dataBinder = idcClient.createBinder();
             dataBinder.putLocal("IdcService", "DOC_INFO");
             dataBinder.putLocal("dID", docInfo.get("DID"));
-            ServiceResponse response = idcClient.sendRequest(this.userContext, dataBinder);
-            DataBinder respBinder = response.getResponseAsBinder();
-            String url = respBinder.getLocal("DocUrl");
-            String tempFileName = url.substring(url.lastIndexOf("/") + 1);
-            String fileName = tempFileName;
-            if (tempFileName.contains("~")) {
-                fileName = tempFileName.substring(0, tempFileName.lastIndexOf("~"));
-                fileName = fileName + tempFileName.substring(tempFileName.lastIndexOf("."));
-                url = url.replace(tempFileName, fileName);
+            ServiceResponse docInfoResponse = idcClient.sendRequest(this.userContext, dataBinder);
+            try {
+                DataBinder respBinder = docInfoResponse.getResponseAsBinder();
+                String url = respBinder.getLocal("DocUrl");
+                String tempFileName = url.substring(url.lastIndexOf("/") + 1);
+                String fileName = tempFileName;
+                if (tempFileName.contains("~")) {
+                    fileName = tempFileName.substring(0, tempFileName.lastIndexOf("~"));
+                    fileName = fileName + tempFileName.substring(tempFileName.lastIndexOf("."));
+                    url = url.replace(tempFileName, fileName);
+                }
+                docInfo.put("DocUrl", url);
+            } finally {
+                docInfoResponse.close();
             }
-            docInfo.put("DocUrl", url);
             return docInfo;
         } catch (IdcClientException e) {
-            System.out.println("*******************************************************************************************************************");
-            System.out.println("IDC");
-            System.out.println("*******************************************************************************************************************");
-            e.printStackTrace();
+            logger.error("UCM check-in failed for document {}", documentName, e);
             throw e;
         } catch (IOException e) {
-            System.out.println("*******************************************************************************************************************");
-            System.out.println("IO");
-            System.out.println("*******************************************************************************************************************");
-            e.printStackTrace();
+            logger.error("IO error during check-in of document {}", documentName, e);
             throw e;
         }
     }
@@ -487,9 +509,8 @@ public class UCMUtilities implements IContent {
     private String checkInDocument(String documentName, String documentTitle, String documentType, String securityGroup,
                                    InputStream primaryFile, String documentFileName,
                                    Map<String, Object> customMetadata) throws IOException, Exception {
-        DataBinder dataBinder = null;
         try {
-            dataBinder = idcClient.createBinder();
+            DataBinder dataBinder = idcClient.createBinder();
             dataBinder.putLocal("IdcService", "CHECKIN_UNIVERSAL");
             dataBinder.putLocal("dDocTitle", documentTitle);
             if (documentName != null && documentName.length() > 0) {
@@ -506,23 +527,20 @@ public class UCMUtilities implements IContent {
                     }
                 }
             }
-            response = idcClient.sendRequest(this.userContext, dataBinder);
-            DataBinder responseBinder = response.getResponseAsBinder();
-            Collection<String> did = responseBinder.getResultSetNames();
-            System.out.println(" File checked in and document ID= :" + responseBinder.getLocalData().get("dID"));
-            System.out.println(" File checked in and document ID= :" + responseBinder.getLocal("dDocName"));
-            return responseBinder.getLocalData().get("dDocName");
+            ServiceResponse response = idcClient.sendRequest(this.userContext, dataBinder);
+            try {
+                DataBinder responseBinder = response.getResponseAsBinder();
+                logger.debug("File checked in with dID {} and dDocName {}",
+                        responseBinder.getLocalData().get("dID"), responseBinder.getLocal("dDocName"));
+                return responseBinder.getLocalData().get("dDocName");
+            } finally {
+                response.close();
+            }
         } catch (IdcClientException e) {
-            System.out.println("*******************************************************************************************************************");
-            System.out.println("IDC");
-            System.out.println("*******************************************************************************************************************");
-            e.printStackTrace();
+            logger.error("UCM check-in failed for document {}", documentName, e);
             throw e;
         } catch (IOException e) {
-            System.out.println("*******************************************************************************************************************");
-            System.out.println("IO");
-            System.out.println("*******************************************************************************************************************");
-            e.printStackTrace();
+            logger.error("IO error during check-in of document {}", documentName, e);
             throw e;
         }
     }
@@ -530,24 +548,15 @@ public class UCMUtilities implements IContent {
     private InputStream getDocumentFile(String documentID) {
         try {
             DataBinder binder = idcClient.createBinder();
-            if (binder != null) {
-                System.out.println("Binder is not null");
-                System.out.println("USer  = " + userContext.getUser());
-            }
             binder.putLocal("IdcService", "GET_FILE");
             binder.putLocal("dDocName", documentID);
             binder.putLocal("RevisionSelectionMethod", "LatestReleased");
             binder.putLocal("allowInterrupt", "1");
             binder.putLocal("Rendition", "Primary");
-            response = idcClient.sendRequest(this.userContext, binder);
-            if (response.getResponseStream() != null) {
-                System.out.println("----------------------------- File is not null ------------------------");
-            }
+            ServiceResponse response = idcClient.sendRequest(this.userContext, binder);
             return response.getResponseStream();
         } catch (IdcClientException e) {
-            System.out.println("//////////////////////////////////////////////////////////////////////////////");
-            e.printStackTrace();
-            System.out.println("//////////////////////////////////////////////////////////////////////////////");
+            logger.error("Failed to fetch file {} from UCM", documentID, e);
         }
         return null;
     }
@@ -556,8 +565,7 @@ public class UCMUtilities implements IContent {
                                     String dSecurityGroup, File dPrimaryFile,
                                     Map<String, String> docAttributes) throws IdcClientException, IOException,
                                                                               Exception {
-        DataBinder dataBinder = null;
-        dataBinder = idcClient.createBinder();
+        DataBinder dataBinder = idcClient.createBinder();
         String docName = this.getDocName(dId);
         String parentId = this.getDocParentId(dId);
         dataBinder.putLocal("IdcService", "CHECKIN_UNIVERSAL");
@@ -573,34 +581,31 @@ public class UCMUtilities implements IContent {
         if (dPrimaryFile.exists()) {
             dataBinder.addFile("primaryFile", dPrimaryFile);
         }
-        if(docAttributes == null){
+        if (docAttributes == null) {
             docAttributes = new HashMap<>();
         }
         docAttributes.put("xISNEWVERSION", "TRUE");
-        if (docAttributes != null) {
-            Iterator it = docAttributes.entrySet().iterator();
-            while (it.hasNext()) {
-                Map.Entry pairs = (Map.Entry) it.next();
-                dataBinder.putLocal(pairs.getKey() + "", pairs.getValue() + "");
-                it.remove();
-            }
+        Iterator it = docAttributes.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry pairs = (Map.Entry) it.next();
+            dataBinder.putLocal(pairs.getKey() + "", pairs.getValue() + "");
+            it.remove();
         }
         ServiceResponse response = idcClient.sendRequest(userContext, dataBinder);
-        DataBinder responseBinder = response.getResponseAsBinder();
-        Collection<String> did = responseBinder.getResultSetNames();
-        System.out.println(" File Version Updated in and dID= " + responseBinder.getLocalData().get("dID"));
-        if (response != null) {
+        try {
+            DataBinder responseBinder = response.getResponseAsBinder();
+            logger.debug("File version updated with dID {}", responseBinder.getLocalData().get("dID"));
+            return responseBinder.getLocalData().get("dID");
+        } finally {
             response.close();
         }
-        return responseBinder.getLocalData().get("dID");
     }
-    
+
     public String checkInNewVersion(String docTitle, String dId, String dDocAuthor, String dDocType,
-                                    String dSecurityGroup, InputStream dPrimaryFile,String documentFileName,
+                                    String dSecurityGroup, InputStream dPrimaryFile, String documentFileName,
                                     Map<String, String> docAttributes) throws IdcClientException, IOException,
                                                                               Exception {
-        DataBinder dataBinder = null;
-        dataBinder = idcClient.createBinder();
+        DataBinder dataBinder = idcClient.createBinder();
         String docName = this.getDocName(dId);
         String parentId = this.getDocParentId(dId);
         dataBinder.putLocal("IdcService", "CHECKIN_UNIVERSAL");
@@ -614,26 +619,24 @@ public class UCMUtilities implements IContent {
         }
         dataBinder.putLocal("dPrimaryFile", "ARCHIVE");
         dataBinder.addFile("primaryFile", new TransferFile(dPrimaryFile, documentFileName, dPrimaryFile.available()));
-        if(docAttributes == null){
+        if (docAttributes == null) {
             docAttributes = new HashMap<>();
         }
         docAttributes.put("xISNEWVERSION", "TRUE");
-        if (docAttributes != null) {
-            Iterator it = docAttributes.entrySet().iterator();
-            while (it.hasNext()) {
-                Map.Entry pairs = (Map.Entry) it.next();
-                dataBinder.putLocal(pairs.getKey() + "", pairs.getValue() + "");
-                it.remove();
-            }
+        Iterator it = docAttributes.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry pairs = (Map.Entry) it.next();
+            dataBinder.putLocal(pairs.getKey() + "", pairs.getValue() + "");
+            it.remove();
         }
         ServiceResponse response = idcClient.sendRequest(userContext, dataBinder);
-        DataBinder responseBinder = response.getResponseAsBinder();
-        Collection<String> did = responseBinder.getResultSetNames();
-        System.out.println(" File Version Updated in and dID= " + responseBinder.getLocalData().get("dID"));
-        if (response != null) {
+        try {
+            DataBinder responseBinder = response.getResponseAsBinder();
+            logger.debug("File version updated with dID {}", responseBinder.getLocalData().get("dID"));
+            return responseBinder.getLocalData().get("dID");
+        } finally {
             response.close();
         }
-        return responseBinder.getLocalData().get("dID");
     }
 
     public String getDocParentId(String dId) {
@@ -643,82 +646,85 @@ public class UCMUtilities implements IContent {
             binder.putLocal("IdcService", "DOC_INFO");
             binder.putLocal("dID", dId);
             ServiceResponse response = idcClient.sendRequest(userContext, binder);
-            DataBinder responseData = response.getResponseAsBinder();
-            System.out.println(responseData.getResultSetNames());
-            DataResultSet ds = responseData.getResultSet("DOC_INFO");
-            dDocName = ds.getRows()
-                         .get(0)
-                         .get("xCollectionID");
+            try {
+                DataBinder responseData = response.getResponseAsBinder();
+                DataResultSet ds = responseData.getResultSet("DOC_INFO");
+                dDocName = ds.getRows()
+                             .get(0)
+                             .get("xCollectionID");
+            } finally {
+                response.close();
+            }
         } catch (Exception ex) {
-            System.out.println("Error: " + ex.getMessage());
+            logger.error("Failed to fetch parent id for dID {}", dId, ex);
             dDocName = null;
         }
         return dDocName;
     }
 
     public String getDocName(String dID) throws Exception {
-        ServiceResponse myServiceResponse = null;
         DataBinder myBinder = idcClient.createBinder();
         myBinder.putLocal("IdcService", "DOC_INFO");
         myBinder.putLocal("dID", dID);
-        myServiceResponse = idcClient.sendRequest(userContext, myBinder);
-        DataBinder myResponseDataBinder = myServiceResponse.getResponseAsBinder();
-        return myResponseDataBinder.getLocal("dDocName");
+        ServiceResponse myServiceResponse = idcClient.sendRequest(userContext, myBinder);
+        try {
+            DataBinder myResponseDataBinder = myServiceResponse.getResponseAsBinder();
+            return myResponseDataBinder.getLocal("dDocName");
+        } finally {
+            myServiceResponse.close();
+        }
     }
 
     public InputStream getDocumentFileByDID(String did) {
         try {
             DataBinder binder = idcClient.createBinder();
-            if (binder != null) {
-                System.out.println("Binder is not null");
-                System.out.println("USer  = " + userContext.getUser());
-            }
             binder.putLocal("IdcService", "GET_FILE");
             binder.putLocal("dID", did);
             binder.putLocal("RevisionSelectionMethod", "LatestReleased");
             binder.putLocal("allowInterrupt", "1");
             binder.putLocal("Rendition", "Primary");
-            response = idcClient.sendRequest(this.userContext, binder);
-            if (response.getResponseStream() != null) {
-                System.out.println("----------------------------- File is not null ------------------------");
-            }
+            ServiceResponse response = idcClient.sendRequest(this.userContext, binder);
             return response.getResponseStream();
         } catch (IdcClientException e) {
-            System.out.println("//////////////////////////////////////////////////////////////////////////////");
-            e.printStackTrace();
-            System.out.println("//////////////////////////////////////////////////////////////////////////////");
+            logger.error("Failed to fetch file by dID {} from UCM", did, e);
         }
         return null;
     }
 
     public void checkOutDocument(String documentName) throws CheckOutException {
-        DataBinder dataBinder = null;
         try {
-            dataBinder = idcClient.createBinder();
+            DataBinder dataBinder = idcClient.createBinder();
             dataBinder.putLocal("IdcService", "CHECKOUT_BY_NAME");
             dataBinder.putLocal("dDocName", documentName);
-            response = idcClient.sendRequest(userContext, dataBinder);
-            serverBinder = response.getResponseAsBinder();
+            ServiceResponse response = idcClient.sendRequest(userContext, dataBinder);
+            try {
+                response.getResponseAsBinder();
+            } finally {
+                response.close();
+            }
         } catch (IdcClientException e) {
             throw new CheckOutException(e.getMessage());
         }
     }
 
     public void unDoCheckOutDocument(String documentName) throws CheckOutException {
-        DataBinder dataBinder = null;
         try {
-            dataBinder = idcClient.createBinder();
+            DataBinder dataBinder = idcClient.createBinder();
             dataBinder.putLocal("IdcService", "UNDO_CHECKOUT_BY_NAME");
             dataBinder.putLocal("dDocName", documentName);
-            response = idcClient.sendRequest(userContext, dataBinder);
-            serverBinder = response.getResponseAsBinder();
+            ServiceResponse response = idcClient.sendRequest(userContext, dataBinder);
+            try {
+                response.getResponseAsBinder();
+            } finally {
+                response.close();
+            }
         } catch (IdcClientException e) {
             throw new CheckOutException(e.getMessage());
         }
     }
 
     private String resolveDocName(String contentType, String contentId) {
-        return "DS-" + contentType.substring(0, 2).toUpperCase() +"-"+ contentId;
+        return "DS-" + contentType.substring(0, 2).toUpperCase() + "-" + contentId;
     }
 
     private Date resolveDate(String format, String dateStr) {
@@ -729,8 +735,7 @@ public class UCMUtilities implements IContent {
             date = df.parse(dateStr);
             return date;
         } catch (ParseException pe) {
-            // TODO: Add catch code
-            pe.printStackTrace();
+            logger.error("Failed to parse date {} with format {}", dateStr, format, pe);
         }
         return date;
     }
@@ -745,9 +750,9 @@ public class UCMUtilities implements IContent {
             // Register the file and ReportFactory for call back of the parser
             sp.parse(in, new XMLHandler());
         } catch (SAXException exception) {
-            exception.printStackTrace();
+            logger.error("Failed to parse /ucm_config.xml", exception);
         } catch (ParserConfigurationException exception) {
-            exception.printStackTrace();
+            logger.error("Failed to configure XML parser for /ucm_config.xml", exception);
         } catch (Exception exception) {
             throw new ConfigurationException("Error reading /ucm_config.xml");
         }
@@ -776,21 +781,10 @@ public class UCMUtilities implements IContent {
         public void endElement(String uri, String localName, String qName) throws SAXException {
             if (qName.equalsIgnoreCase("url")) {
                 url = tempVal;
-           /* } else if (qName.equalsIgnoreCase("serverHostname")) {
-                serverHostname = tempVal;
-                System.out.println(serverHostname);
-            } else if (qName.equalsIgnoreCase("serverPort")) {
-                serverPort = tempVal;*/
-            //} else if (qName.equalsIgnoreCase("soaServerPort")) {
-                //soaServerPort = tempVal;
-            //} else if (qName.equalsIgnoreCase("soaServerHostname")) {
-                //soaServerHostName = tempVal;
             } else if (qName.equalsIgnoreCase("username")) {
                 username = tempVal;
             } else if (qName.equalsIgnoreCase("password")) {
                 password = tempVal;
-            //} else if (qName.equalsIgnoreCase("datasource")) {
-                //datasource = tempVal;
             }
         }
 
@@ -815,7 +809,7 @@ public class UCMUtilities implements IContent {
         try {
             return this.idcClient.sendRequest(this.userContext, binder);
         } catch (IdcClientException e) {
-            e.printStackTrace();
+            logger.error("Failed to create document type {}", contentTypeName, e);
         }
         return null;
     }
@@ -827,7 +821,7 @@ public class UCMUtilities implements IContent {
         try {
             return this.idcClient.sendRequest(this.userContext, binder);
         } catch (IdcClientException e) {
-            e.printStackTrace();
+            logger.error("Failed to delete document type {}", contentTypeName, e);
         }
         return null;
     }
@@ -841,39 +835,19 @@ public class UCMUtilities implements IContent {
         this.idcClient.sendRequest(userContext, dataBinder);
     }
 
-//    public static String getServerHostname() {
-//        return serverHostname;
-//    }
-
-//    public static String getSOAServerPort() {
-//        return soaServerPort;
-//    }
-
-//    public static String getSOAServerHostname() {
-//        return soaServerHostName;
-//    }
-
-//    public static String getDatasourceName() {
-//        return datasource;
-//    }
-
-
-    public void UpdateDocInfo(Map<String, String> metaData, String did,String contentId) throws Exception {
+    public void UpdateDocInfo(Map<String, String> metaData, String did, String contentId) throws Exception {
 
         DataBinder dataBinder = idcClient.createBinder();
         dataBinder.putLocal("IdcService", "UPDATE_DOCINFO");
         dataBinder.putLocal("dID", did);
-               
-        String docName = getDocName(did);
-        System.out.println("dID: " + did + " | docName: " + docName);
-        
-        ///////////////////////////
-        dataBinder.putLocal("dDocName", docName);
 
+        String docName = getDocName(did);
+        logger.debug("dID: {} | docName: {}", did, docName);
+
+        dataBinder.putLocal("dDocName", docName);
         dataBinder.putLocal("dSecurityGroup", "Public");
 
-
-        System.out.println("metaData size ===== " + metaData.size());
+        logger.debug("metaData size = {}", metaData.size());
         Iterator it = metaData.entrySet().iterator();
         while (it.hasNext()) {
             Map.Entry pair = (Map.Entry) it.next();
@@ -882,28 +856,28 @@ public class UCMUtilities implements IContent {
             String trimemdMeta = pair.getKey()
                                      .toString()
                                      .replaceAll("\\s+", "_");
-//            System.out.println("trimemdMeta:" + trimemdMeta);
             dataBinder.putLocal(trimemdMeta, pair.getValue() == null ? null : pair.getValue().toString());
-//            System.out.println(pair.getKey() + " = " + pair.getValue() + "from ucmbean");
             it.remove();
         }
 
         ServiceResponse response = idcClient.sendRequest(new IdcContext(username), dataBinder);
-        System.out.println(response.getResponseAsString());
-        checkResponseValidity(response);
+        try {
+            checkResponseValidity(response);
+        } finally {
+            response.close();
+        }
     }
 
     public List<UCMDocument> getDocUrlByContentId(String contentId) throws IdcClientException, IOException {
         String query = "dDocName <matches> `" + contentId + "`";
-        System.out.println("Search Query :: " + query);
-        String fileUrl = "";
+        logger.debug("Search query: {}", query);
         IdcClient client = idcClient;
         DataBinder dataBinder = client.createBinder();
         dataBinder.putLocal("IdcService", "GET_SEARCH_RESULTS");
         dataBinder.putLocal("QueryText", query);
         dataBinder.putLocal("ResultCount", "2");
-        IdcContext userContext = new IdcContext(username);
-        ServiceResponse response = client.sendRequest(userContext, dataBinder);
+        IdcContext searchContext = new IdcContext(username);
+        ServiceResponse response = client.sendRequest(searchContext, dataBinder);
         DataBinder binder = response.getResponseAsBinder();
         DataResultSet resultSet = binder.getResultSet("SearchResults");
         // loop over the results
@@ -916,34 +890,30 @@ public class UCMUtilities implements IContent {
             dataBinder.putLocal("IdcService", "DOC_INFO");
             String Did = resultObject.getDId();
             dataBinder.putLocal("dID", Did);
-            ServiceResponse responses = client.sendRequest(userContext, dataBinder);
+            ServiceResponse responses = client.sendRequest(searchContext, dataBinder);
             DataBinder responseData = responses.getResponseAsBinder();
             String docUrl = responseData.getLocal("DocUrl");
             resultObject.setDocUrl(docUrl);
-            fileUrl = docUrl;
             docList.add(resultObject);
         }
-        //response.close();
-        System.out.println("fileUrl/download >>>> " + fileUrl);
         return docList;
     }
 
     public String getDocUrlByDid(String did) throws IdcClientException, IOException {
 
         String query = "dID <matches> `" + did + "`";
-        System.out.println("Search Query :: " + query);
+        logger.debug("Search query: {}", query);
         String fileUrl = "";
         IdcClient client = idcClient;
         DataBinder dataBinder = client.createBinder();
         dataBinder.putLocal("IdcService", "GET_SEARCH_RESULTS");
         dataBinder.putLocal("QueryText", query);
         dataBinder.putLocal("ResultCount", "2");
-        IdcContext userContext = new IdcContext(username);
-        ServiceResponse response = client.sendRequest(userContext, dataBinder);
+        IdcContext searchContext = new IdcContext(username);
+        ServiceResponse response = client.sendRequest(searchContext, dataBinder);
         DataBinder binder = response.getResponseAsBinder();
         DataResultSet resultSet = binder.getResultSet("SearchResults");
         // loop over the results
-        List<UCMDocument> docList = new ArrayList<UCMDocument>();
         for (DataObject dataObject : resultSet.getRows()) {
             UCMDocument resultObject = new UCMDocument();
             resultObject.setDId(dataObject.get("dID"));
@@ -952,38 +922,38 @@ public class UCMUtilities implements IContent {
             dataBinder.putLocal("IdcService", "DOC_INFO");
             String Did = resultObject.getDId();
             dataBinder.putLocal("dID", Did);
-            ServiceResponse responses = client.sendRequest(userContext, dataBinder);
+            ServiceResponse responses = client.sendRequest(searchContext, dataBinder);
             DataBinder responseData = responses.getResponseAsBinder();
             String docUrl = responseData.getLocal("DocUrl");
             resultObject.setDocUrl(docUrl);
             fileUrl = docUrl;
-            docList.add(resultObject);
         }
-        //response.close();
-        System.out.println("fileUrl/download >>>> " + fileUrl);
+        logger.debug("fileUrl/download >>>> {}", fileUrl);
         return fileUrl;
     }
-    
+
     public String getDocNameByDid(String did) throws IdcClientException, IOException {
 
-         String query = "dID <matches> `" + did + "`";
-         System.out.println("Search Query :: " + query);
-         String fileUrl = "";
-         IdcClient client = idcClient;
-         DataBinder dataBinder = client.createBinder();
-         dataBinder.putLocal("IdcService", "GET_SEARCH_RESULTS");
-         dataBinder.putLocal("QueryText", query);
-         dataBinder.putLocal("ResultCount", "2");
-         IdcContext userContext = new IdcContext(username);
-         ServiceResponse response = client.sendRequest(userContext, dataBinder);
-         DataBinder binder = response.getResponseAsBinder();
-         DataResultSet resultSet = binder.getResultSet("SearchResults");
-         
-         DataObject dataObject = resultSet.getRows().get(0);
-         return dataObject.get("dDocName");
-     }
-    
-    
+        String query = "dID <matches> `" + did + "`";
+        logger.debug("Search query: {}", query);
+        IdcClient client = idcClient;
+        DataBinder dataBinder = client.createBinder();
+        dataBinder.putLocal("IdcService", "GET_SEARCH_RESULTS");
+        dataBinder.putLocal("QueryText", query);
+        dataBinder.putLocal("ResultCount", "2");
+        IdcContext searchContext = new IdcContext(username);
+        ServiceResponse response = client.sendRequest(searchContext, dataBinder);
+        try {
+            DataBinder binder = response.getResponseAsBinder();
+            DataResultSet resultSet = binder.getResultSet("SearchResults");
+            DataObject dataObject = resultSet.getRows().get(0);
+            return dataObject.get("dDocName");
+        } finally {
+            response.close();
+        }
+    }
+
+
     public String checkResponseValidity(ServiceResponse response) throws IdcClientException, IllegalStateException {
         if (response.getResponseType().equals(ServiceResponse.ResponseType.BINDER)) {
             DataBinder responseBinder = response.getResponseAsBinder(false); // do not check for errors
@@ -997,10 +967,10 @@ public class UCMUtilities implements IContent {
         }
         return null;
     }
-    
+
     public void addMetaDataDef(String Metadataname, String Metadatatype) throws IdcClientException, IOException {
         IdcClient client = idcClient;
-        IdcContext userContext = new IdcContext(username);
+        IdcContext metaContext = new IdcContext(username);
         DataBinder binder = client.createBinder();
         binder.putLocal("IdcService", "ADD_METADEF");
         binder.putLocal("dName", "x" + Metadataname);
@@ -1017,16 +987,14 @@ public class UCMUtilities implements IContent {
         binder.putLocal("dType", Metadatatype);
         binder.putLocal("dOrder", "70000");
         binder.putLocal("dDefaultValue", "");
-        ServiceResponse response = client.sendRequest(userContext, binder);
-        //        System.out.println("add_metaDataDef Done .." + response.getResponseAsString());
-    //        this.updateMetaTable();
-        System.out.println(checkResponseValidity(response));
+        ServiceResponse response = client.sendRequest(metaContext, binder);
+        logger.debug("addMetaDataDef result: {}", checkResponseValidity(response));
     }
-    
+
     public void updateMetaTable() throws IdcClientException {
         DataBinder binder = idcClient.createBinder();
         binder.putLocal("IdcService", "UPDATE_META_TABLE");
         ServiceResponse response = idcClient.sendRequest(userContext, binder);
-        System.out.println(checkResponseValidity(response));
+        logger.debug("updateMetaTable result: {}", checkResponseValidity(response));
     }
 }

@@ -36,6 +36,10 @@ import java.util.zip.ZipOutputStream;
 @Service
 public class ECMService {
 
+    // Tika is thread-safe and expensive to initialize; share a single instance instead of one per upload
+    private static final Tika TIKA = new Tika();
+    private static final int BUFFER_SIZE = 8192;
+
     @Resource(name = "getUserDetails")
     private UserDetails userDetails;
     private final IContent ucmUtilities;
@@ -65,8 +69,7 @@ public class ECMService {
         byte[] decodedBytes = Base64.decodeBase64(request.getDocBase64().getBytes());
 
         //detect file mime type
-        Tika tika = new Tika();
-        String actualMimeType = tika.detect(decodedBytes);
+        String actualMimeType = TIKA.detect(decodedBytes);
 
         //validate mime type
         if (!FileTypeEnum.isValidType(actualMimeType, request.getMimeType(), request.getFileName()))
@@ -119,21 +122,21 @@ public class ECMService {
         downloadDocResponse.setFileFormat(documentInfo.getFormat());
 
 
-        InputStream docInputStream = ucmUtilities.download(request.getDocId());
-
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
 
-        int nRead;
-        byte[] data = new byte[4];
+        // try-with-resources so the UCM connection is always released
+        try (InputStream docInputStream = ucmUtilities.download(request.getDocId())) {
+            if (docInputStream == null)
+                throw new DocumentNotFoundException();
 
-        while ((nRead = docInputStream.read(data, 0, data.length)) != -1) {
-            buffer.write(data, 0, nRead);
+            int nRead;
+            byte[] data = new byte[BUFFER_SIZE];
+            while ((nRead = docInputStream.read(data, 0, data.length)) != -1) {
+                buffer.write(data, 0, nRead);
+            }
         }
 
-        buffer.flush();
-        byte[] targetArray = buffer.toByteArray();
-
-        String encodedDoc = new String(Base64.encodeBase64(targetArray));
+        String encodedDoc = new String(Base64.encodeBase64(buffer.toByteArray()));
 
         downloadDocResponse.setEncodedDoc(encodedDoc);
 
@@ -200,40 +203,32 @@ public class ECMService {
 
                 UCMDocument documentInfo = ucmUtilities.getDocumentInfo(docId);
 
+                if (documentInfo == null)
+                    throw new DocumentNotFoundException();
+
                 ZipEntry zipEntry = new ZipEntry(index + "-" + documentInfo.getFilename());
                 zos.putNextEntry(zipEntry);
                 index++;
 
-                InputStream docInputStream = ucmUtilities.download(docId);
-//                ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-                int len;
-                byte[] buffer = new byte[1024];
-                while ((len = docInputStream.read(buffer)) > 0) {
-                    zos.write(buffer, 0, len);
-                }
-//                buffer.flush();
-//                byte[] targetArray = buffer.toByteArray();
-//                ByteArrayInputStream bais = new ByteArrayInputStream(targetArray);
-                // one line, able to handle large size?
-                //zos.write(bais.readAllBytes());
+                // try-with-resources so each UCM connection is released as soon as its entry is written
+                try (InputStream docInputStream = ucmUtilities.download(docId)) {
+                    if (docInputStream == null)
+                        throw new DocumentNotFoundException();
 
-                // play safe
-//                byte[] buffer = new byte[1024];
-//                int len;
-//                while ((len = bais.read(buffer)) > 0) {
-//                    zos.write(buffer, 0, len);
-//                }
+                    int len;
+                    byte[] buffer = new byte[BUFFER_SIZE];
+                    while ((len = docInputStream.read(buffer)) > 0) {
+                        zos.write(buffer, 0, len);
+                    }
+                }
                 zos.closeEntry();
             }
             zos.finish();
-            zos.close();
+
             DownloadDocResponse downloadDocResponse = new DownloadDocResponse();
             downloadDocResponse.setFileName("files");
             downloadDocResponse.setFileFormat("application/zip");
             downloadDocResponse.setEncodedDoc(new String(Base64.encodeBase64(byteArrayOutputStream.toByteArray())));
-//            try (OutputStream stream = new FileOutputStream("C:\\Users\\Mohamedsalah\\Desktop\\test.zip")) {
-//                stream.write(byteArrayOutputStream.toByteArray());
-//            }
             return downloadDocResponse;
         }
     }
