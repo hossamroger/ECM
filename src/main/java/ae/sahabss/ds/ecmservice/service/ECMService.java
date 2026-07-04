@@ -67,12 +67,18 @@ public class ECMService {
 
     public UploadDocResponse uploadDoc(UploadDocRequest request) throws Exception {
         byte[] decodedBytes = Base64.decodeBase64(request.getDocBase64().getBytes());
+        return uploadDocument(decodedBytes, request.getMimeType(), request.getFileName());
+    }
 
+    /**
+     * Core upload logic shared by v1 (base64) and v2 (raw bytes) endpoints.
+     */
+    public UploadDocResponse uploadDocument(byte[] decodedBytes, String mimeType, String fileName) throws Exception {
         //detect file mime type
         String actualMimeType = TIKA.detect(decodedBytes);
 
         //validate mime type
-        if (!FileTypeEnum.isValidType(actualMimeType, request.getMimeType(), request.getFileName()))
+        if (!FileTypeEnum.isValidType(actualMimeType, mimeType, fileName))
             throw new FileNotValidException();
 
         ucmUtilities.login(ecmAdminUsername, ecmAdminPassword);
@@ -82,13 +88,13 @@ public class ECMService {
         Integer contentId = dsDocumentsDao.getSeqNextVal();
         String contentIdString = "0000000".substring(0, 7 - contentId.toString().length()) + contentId;
 
-        String docId = ucmUtilities.upload(contentIdString, "Document", request.getFileName(), docInputStream, null);
+        String docId = ucmUtilities.upload(contentIdString, "Document", fileName, docInputStream, null);
 
         DsDocumentsEntity documentsEntity = new DsDocumentsEntity();
         documentsEntity.setDsDocumentId(contentId);
         documentsEntity.setDocId(docId);
-        documentsEntity.setMimeType(request.getMimeType());
-        documentsEntity.setFileName(request.getFileName());
+        documentsEntity.setMimeType(mimeType);
+        documentsEntity.setFileName(fileName);
         documentsEntity.setCreatedDate(new Timestamp(System.currentTimeMillis()));
         dsDocumentsDao.save(documentsEntity);
 
@@ -108,6 +114,20 @@ public class ECMService {
     }
 
     public DownloadDocResponse downloadDoc(DownloadDocRequest request) throws Exception {
+        BinaryDocResponse binaryDoc = downloadDocBinary(request);
+
+        DownloadDocResponse downloadDocResponse = new DownloadDocResponse();
+        downloadDocResponse.setFileName(binaryDoc.getFileName());
+        downloadDocResponse.setFileFormat(binaryDoc.getFileFormat());
+        downloadDocResponse.setEncodedDoc(new String(Base64.encodeBase64(binaryDoc.getContent())));
+
+        return downloadDocResponse;
+    }
+
+    /**
+     * Core download logic shared by v1 (base64) and v2 (raw bytes) endpoints.
+     */
+    public BinaryDocResponse downloadDocBinary(DownloadDocRequest request) throws Exception {
         validateAuthorizedUser(request);
 
         ucmUtilities.login(ecmAdminUsername, ecmAdminPassword);
@@ -116,11 +136,6 @@ public class ECMService {
 
         if (documentInfo == null)
             throw new DocumentNotFoundException();
-
-        DownloadDocResponse downloadDocResponse = new DownloadDocResponse();
-        downloadDocResponse.setFileName(documentInfo.getFilename());
-        downloadDocResponse.setFileFormat(documentInfo.getFormat());
-
 
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
 
@@ -136,11 +151,7 @@ public class ECMService {
             }
         }
 
-        String encodedDoc = new String(Base64.encodeBase64(buffer.toByteArray()));
-
-        downloadDocResponse.setEncodedDoc(encodedDoc);
-
-        return downloadDocResponse;
+        return new BinaryDocResponse(documentInfo.getFilename(), documentInfo.getFormat(), buffer.toByteArray());
     }
 
     private void validateAuthorizedUser(DownloadDocRequest request) throws UserNotAuthorizedException {
@@ -194,6 +205,19 @@ public class ECMService {
     }
 
     public DownloadDocResponse downloadDocsByIds(List<String> docIdsList) throws Exception {
+        byte[] zipBytes = downloadDocsByIdsAsZip(docIdsList);
+
+        DownloadDocResponse downloadDocResponse = new DownloadDocResponse();
+        downloadDocResponse.setFileName("files");
+        downloadDocResponse.setFileFormat("application/zip");
+        downloadDocResponse.setEncodedDoc(new String(Base64.encodeBase64(zipBytes)));
+        return downloadDocResponse;
+    }
+
+    /**
+     * Core zip-bundling logic shared by v1 (base64) and v2 (raw bytes) endpoints.
+     */
+    public byte[] downloadDocsByIdsAsZip(List<String> docIdsList) throws Exception {
         ucmUtilities.login(ecmAdminUsername, ecmAdminPassword);
 
         ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
@@ -224,13 +248,8 @@ public class ECMService {
                 zos.closeEntry();
             }
             zos.finish();
-
-            DownloadDocResponse downloadDocResponse = new DownloadDocResponse();
-            downloadDocResponse.setFileName("files");
-            downloadDocResponse.setFileFormat("application/zip");
-            downloadDocResponse.setEncodedDoc(new String(Base64.encodeBase64(byteArrayOutputStream.toByteArray())));
-            return downloadDocResponse;
         }
+        return byteArrayOutputStream.toByteArray();
     }
 
 
