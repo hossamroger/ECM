@@ -109,8 +109,10 @@ public class ECMServiceControllerWrapper {
 
     public GenericResponse uploadDocV2(MultipartFile file, String mimeType, String fileName) {
         GenericResponse genericResponse = new GenericResponse();
-        try {
-            UploadDocResponse uploadDocResponse = ecmService.uploadDocument(file.getBytes(), mimeType, fileName);
+        // stream the multipart temp file straight into UCM — no getBytes() copy
+        try (java.io.InputStream fileStream = file.getInputStream()) {
+            UploadDocResponse uploadDocResponse =
+                    ecmService.uploadDocumentStream(fileStream, file.getSize(), mimeType, fileName);
             genericResponse.setStatusCode(HttpStatus.OK.value());
             genericResponse.setErrorFlag("F");
             genericResponse.setData(uploadDocResponse);

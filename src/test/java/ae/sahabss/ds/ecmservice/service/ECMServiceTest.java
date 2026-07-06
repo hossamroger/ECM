@@ -40,6 +40,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -98,7 +99,7 @@ class ECMServiceTest {
     @Test
     void uploadV2_checksInDocumentAndPersistsMetadata() throws Exception {
         when(documentsDao.getSeqNextVal()).thenReturn(123);
-        when(ucm.upload(anyString(), anyString(), anyString(), any(InputStream.class), any()))
+        when(ucm.upload(anyString(), anyString(), anyString(), any(InputStream.class), anyLong(), any()))
                 .thenReturn("DOC-123");
 
         UploadDocResponse response = service.uploadDocument(PDF_BYTES, "application/pdf", "contract.pdf");
@@ -106,7 +107,7 @@ class ECMServiceTest {
         assertEquals("DOC-123", response.getDocId());
 
         // UCM check-in got the zero-padded sequence id and original file name
-        verify(ucm).upload(eq("0000123"), eq("Document"), eq("contract.pdf"), any(InputStream.class), eq(null));
+        verify(ucm).upload(eq("0000123"), eq("Document"), eq("contract.pdf"), any(InputStream.class), eq((long) PDF_BYTES.length), eq(null));
 
         ArgumentCaptor<DsDocumentsEntity> docCaptor = ArgumentCaptor.forClass(DsDocumentsEntity.class);
         verify(documentsDao).save(docCaptor.capture());
@@ -127,7 +128,7 @@ class ECMServiceTest {
     @Test
     void uploadV1_base64_behavesIdenticallyToV2() throws Exception {
         when(documentsDao.getSeqNextVal()).thenReturn(45);
-        when(ucm.upload(anyString(), anyString(), anyString(), any(InputStream.class), any()))
+        when(ucm.upload(anyString(), anyString(), anyString(), any(InputStream.class), anyLong(), any()))
                 .thenReturn("DOC-45");
 
         UploadDocRequest request = new UploadDocRequest();
@@ -139,7 +140,43 @@ class ECMServiceTest {
 
         assertEquals("DOC-45", response.getDocId());
         // Same core call as v2: decoded bytes reached UCM with identical metadata
-        verify(ucm).upload(eq("0000045"), eq("Document"), eq("contract.pdf"), any(InputStream.class), eq(null));
+        verify(ucm).upload(eq("0000045"), eq("Document"), eq("contract.pdf"), any(InputStream.class), eq((long) PDF_BYTES.length), eq(null));
+    }
+
+    @Test
+    void uploadV2Stream_nonMarkableStream_detectsMimeAndDeliversFullContent() throws Exception {
+        when(documentsDao.getSeqNextVal()).thenReturn(77);
+
+        // capture what actually reaches UCM so we can prove Tika's MIME peek
+        // did not consume any bytes from the stream
+        final java.io.ByteArrayOutputStream received = new java.io.ByteArrayOutputStream();
+        when(ucm.upload(anyString(), anyString(), anyString(), any(InputStream.class), anyLong(), any()))
+                .thenAnswer(invocation -> {
+                    InputStream in = invocation.getArgument(3);
+                    byte[] buffer = new byte[8192];
+                    int len;
+                    while ((len = in.read(buffer)) > 0) {
+                        received.write(buffer, 0, len);
+                    }
+                    return "DOC-77";
+                });
+
+        // simulate a real servlet/multipart stream: no mark/reset support
+        InputStream nonMarkable = new java.io.FilterInputStream(new ByteArrayInputStream(PDF_BYTES)) {
+            @Override
+            public boolean markSupported() {
+                return false;
+            }
+        };
+
+        UploadDocResponse response =
+                service.uploadDocumentStream(nonMarkable, PDF_BYTES.length, "application/pdf", "contract.pdf");
+
+        assertEquals("DOC-77", response.getDocId());
+        // UCM received the declared length and the COMPLETE content from byte 0
+        verify(ucm).upload(eq("0000077"), eq("Document"), eq("contract.pdf"), any(InputStream.class),
+                eq((long) PDF_BYTES.length), eq(null));
+        assertArrayEquals(PDF_BYTES, received.toByteArray());
     }
 
     @Test
@@ -154,7 +191,7 @@ class ECMServiceTest {
         request.setFileName("contract.png");
         assertThrows(FileNotValidException.class, () -> service.uploadDoc(request));
 
-        verify(ucm, never()).upload(anyString(), anyString(), anyString(), any(InputStream.class), any());
+        verify(ucm, never()).upload(anyString(), anyString(), anyString(), any(InputStream.class), anyLong(), any());
         verify(documentsDao, never()).save(any(DsDocumentsEntity.class));
     }
 
@@ -163,7 +200,7 @@ class ECMServiceTest {
         // Bytes and declared MIME agree (PDF) but the extension does not
         assertThrows(FileNotValidException.class,
                 () -> service.uploadDocument(PDF_BYTES, "application/pdf", "contract.exe"));
-        verify(ucm, never()).upload(anyString(), anyString(), anyString(), any(InputStream.class), any());
+        verify(ucm, never()).upload(anyString(), anyString(), anyString(), any(InputStream.class), anyLong(), any());
     }
 
     // ------------------------------------------------------------------

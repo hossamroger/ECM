@@ -23,6 +23,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import javax.annotation.Resource;
+import java.io.BufferedInputStream;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
@@ -72,11 +73,26 @@ public class ECMService {
     }
 
     /**
-     * Core upload logic shared by v1 (base64) and v2 (raw bytes) endpoints.
+     * v1 adapter: base64 has already been decoded into memory, so the bytes
+     * are simply wrapped in a stream for the shared core.
      */
     public UploadDocResponse uploadDocument(byte[] decodedBytes, String mimeType, String fileName) throws Exception {
+        return uploadDocumentStream(new ByteArrayInputStream(decodedBytes), decodedBytes.length, mimeType, fileName);
+    }
+
+    /**
+     * Core upload logic shared by v1 (base64) and v2 (multipart) endpoints.
+     * The content flows from the source stream straight into the UCM check-in
+     * without being fully buffered; Tika only peeks at the leading bytes via
+     * mark/reset for MIME detection. The caller owns closing the stream.
+     */
+    public UploadDocResponse uploadDocumentStream(InputStream inputStream, long contentLength,
+                                                  String mimeType, String fileName) throws Exception {
+        // Tika needs mark/reset to detect from the prefix and rewind
+        InputStream markableStream = inputStream.markSupported() ? inputStream : new BufferedInputStream(inputStream);
+
         //detect file mime type
-        String actualMimeType = TIKA.detect(decodedBytes);
+        String actualMimeType = TIKA.detect(markableStream);
 
         //validate mime type
         if (!FileTypeEnum.isValidType(actualMimeType, mimeType, fileName))
@@ -84,12 +100,10 @@ public class ECMService {
 
         ucmUtilities.login(ecmAdminUsername, ecmAdminPassword);
 
-        InputStream docInputStream = new ByteArrayInputStream(decodedBytes);
-
         Integer contentId = dsDocumentsDao.getSeqNextVal();
         String contentIdString = "0000000".substring(0, 7 - contentId.toString().length()) + contentId;
 
-        String docId = ucmUtilities.upload(contentIdString, "Document", fileName, docInputStream, null);
+        String docId = ucmUtilities.upload(contentIdString, "Document", fileName, markableStream, contentLength, null);
 
         DsDocumentsEntity documentsEntity = new DsDocumentsEntity();
         documentsEntity.setDsDocumentId(contentId);
