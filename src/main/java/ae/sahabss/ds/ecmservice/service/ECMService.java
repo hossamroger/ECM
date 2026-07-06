@@ -26,6 +26,7 @@ import javax.annotation.Resource;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.sql.Timestamp;
 import java.util.ArrayList;
 import java.util.List;
@@ -125,9 +126,12 @@ public class ECMService {
     }
 
     /**
-     * Core download logic shared by v1 (base64) and v2 (raw bytes) endpoints.
+     * Core download logic: validates authorization and existence, then hands
+     * back the open UCM stream. All failures happen BEFORE any content byte
+     * is produced, so callers can still return a JSON error response.
+     * v2 streams this directly to the HTTP response; v1 buffers it for base64.
      */
-    public BinaryDocResponse downloadDocBinary(DownloadDocRequest request) throws Exception {
+    public BinaryDocStream downloadDocStream(DownloadDocRequest request) throws Exception {
         validateAuthorizedUser(request);
 
         ucmUtilities.login(ecmAdminUsername, ecmAdminPassword);
@@ -137,13 +141,24 @@ public class ECMService {
         if (documentInfo == null)
             throw new DocumentNotFoundException();
 
+        InputStream docInputStream = ucmUtilities.download(request.getDocId());
+        if (docInputStream == null)
+            throw new DocumentNotFoundException();
+
+        return new BinaryDocStream(documentInfo.getFilename(), documentInfo.getFormat(), docInputStream);
+    }
+
+    /**
+     * v1 adapter: base64 requires the whole payload in memory, so only the
+     * legacy endpoint buffers; v2 streams.
+     */
+    public BinaryDocResponse downloadDocBinary(DownloadDocRequest request) throws Exception {
+        BinaryDocStream docStream = downloadDocStream(request);
+
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
 
         // try-with-resources so the UCM connection is always released
-        try (InputStream docInputStream = ucmUtilities.download(request.getDocId())) {
-            if (docInputStream == null)
-                throw new DocumentNotFoundException();
-
+        try (InputStream docInputStream = docStream.getInputStream()) {
             int nRead;
             byte[] data = new byte[BUFFER_SIZE];
             while ((nRead = docInputStream.read(data, 0, data.length)) != -1) {
@@ -151,7 +166,7 @@ public class ECMService {
             }
         }
 
-        return new BinaryDocResponse(documentInfo.getFilename(), documentInfo.getFormat(), buffer.toByteArray());
+        return new BinaryDocResponse(docStream.getFileName(), docStream.getFileFormat(), buffer.toByteArray());
     }
 
     private void validateAuthorizedUser(DownloadDocRequest request) throws UserNotAuthorizedException {
@@ -215,27 +230,39 @@ public class ECMService {
     }
 
     /**
-     * Core zip-bundling logic shared by v1 (base64) and v2 (raw bytes) endpoints.
+     * Validates that every requested document exists and resolves the zip
+     * entry names. Runs BEFORE any response byte is produced, so a missing
+     * document still results in a JSON error, never a truncated zip.
      */
-    public byte[] downloadDocsByIdsAsZip(List<String> docIdsList) throws Exception {
+    public List<ZipDocEntry> prepareZipDocs(List<String> docIdsList) throws Exception {
         ucmUtilities.login(ecmAdminUsername, ecmAdminPassword);
 
-        ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
-        try (ZipOutputStream zos = new ZipOutputStream(byteArrayOutputStream)) {
-            int index = 1;
-            for (String docId : docIdsList) {
+        List<ZipDocEntry> entries = new ArrayList<>();
+        int index = 1;
+        for (String docId : docIdsList) {
+            UCMDocument documentInfo = ucmUtilities.getDocumentInfo(docId);
 
-                UCMDocument documentInfo = ucmUtilities.getDocumentInfo(docId);
+            if (documentInfo == null)
+                throw new DocumentNotFoundException();
 
-                if (documentInfo == null)
-                    throw new DocumentNotFoundException();
+            entries.add(new ZipDocEntry(docId, index + "-" + documentInfo.getFilename()));
+            index++;
+        }
+        return entries;
+    }
 
-                ZipEntry zipEntry = new ZipEntry(index + "-" + documentInfo.getFilename());
-                zos.putNextEntry(zipEntry);
-                index++;
+    /**
+     * Streams the validated documents as a zip into the given output stream —
+     * each document flows UCM -> zip -> target in BUFFER_SIZE chunks, so
+     * memory use is constant regardless of bundle size.
+     */
+    public void writeZipEntries(List<ZipDocEntry> entries, OutputStream target) throws Exception {
+        try (ZipOutputStream zos = new ZipOutputStream(target)) {
+            for (ZipDocEntry entry : entries) {
+                zos.putNextEntry(new ZipEntry(entry.getEntryName()));
 
                 // try-with-resources so each UCM connection is released as soon as its entry is written
-                try (InputStream docInputStream = ucmUtilities.download(docId)) {
+                try (InputStream docInputStream = ucmUtilities.download(entry.getDocId())) {
                     if (docInputStream == null)
                         throw new DocumentNotFoundException();
 
@@ -249,6 +276,16 @@ public class ECMService {
             }
             zos.finish();
         }
+    }
+
+    /**
+     * v1 adapter: base64 requires the whole zip in memory; v2 streams it via
+     * {@link #prepareZipDocs} + {@link #writeZipEntries}.
+     */
+    public byte[] downloadDocsByIdsAsZip(List<String> docIdsList) throws Exception {
+        List<ZipDocEntry> entries = prepareZipDocs(docIdsList);
+        ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
+        writeZipEntries(entries, byteArrayOutputStream);
         return byteArrayOutputStream.toByteArray();
     }
 

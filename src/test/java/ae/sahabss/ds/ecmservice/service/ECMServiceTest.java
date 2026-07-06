@@ -7,10 +7,12 @@ import ae.sahabss.ds.ecmservice.dao.DsMessagesDao;
 import ae.sahabss.ds.ecmservice.domain.DsDocAuthorizedUsersEntity;
 import ae.sahabss.ds.ecmservice.domain.DsDocumentsEntity;
 import ae.sahabss.ds.ecmservice.dto.BinaryDocResponse;
+import ae.sahabss.ds.ecmservice.dto.BinaryDocStream;
 import ae.sahabss.ds.ecmservice.dto.DownloadDocRequest;
 import ae.sahabss.ds.ecmservice.dto.DownloadDocResponse;
 import ae.sahabss.ds.ecmservice.dto.UploadDocRequest;
 import ae.sahabss.ds.ecmservice.dto.UploadDocResponse;
+import ae.sahabss.ds.ecmservice.dto.ZipDocEntry;
 import ae.sahabss.ds.ecmservice.exceptions.DocumentNotFoundException;
 import ae.sahabss.ds.ecmservice.exceptions.FileNotValidException;
 import ae.sahabss.ds.ecmservice.exceptions.UserNotAuthorizedException;
@@ -29,6 +31,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -256,6 +259,73 @@ class ECMServiceTest {
 
         assertThrows(DocumentNotFoundException.class,
                 () -> service.downloadDocsByIdsAsZip(Collections.singletonList("GONE")));
+    }
+
+    // ------------------------------------------------------------------
+    // Streaming cores (v2 writes these directly to the HTTP response)
+    // ------------------------------------------------------------------
+
+    @Test
+    void downloadDocStream_returnsExactBytesWithoutBuffering() throws Exception {
+        byte[] payload = randomPayload(5 * 1024 * 1024); // the 5 MB case
+        stubExistingDocument("DOC-S", "big.pdf", "application/pdf", payload);
+        userDetails.setIdType("EP");
+
+        BinaryDocStream docStream = service.downloadDocStream(request("DOC-S"));
+
+        assertEquals("big.pdf", docStream.getFileName());
+        assertEquals("application/pdf", docStream.getFileFormat());
+        // the stream delivers the exact payload when the consumer drains it
+        java.io.ByteArrayOutputStream drained = new java.io.ByteArrayOutputStream();
+        try (InputStream in = docStream.getInputStream()) {
+            byte[] buffer = new byte[8192];
+            int len;
+            while ((len = in.read(buffer)) > 0) {
+                drained.write(buffer, 0, len);
+            }
+        }
+        assertArrayEquals(payload, drained.toByteArray());
+    }
+
+    @Test
+    void downloadDocStream_failsBeforeStreaming_whenDocumentMissing() {
+        when(ucm.getDocumentInfo("MISSING")).thenReturn(null);
+        userDetails.setIdType("EP");
+
+        assertThrows(DocumentNotFoundException.class, () -> service.downloadDocStream(request("MISSING")));
+        verify(ucm, never()).download(anyString());
+    }
+
+    @Test
+    void prepareZipDocs_validatesAllDocsBeforeAnyDownload() {
+        UCMDocument info = new UCMDocument();
+        info.setFilename("ok.pdf");
+        info.setFormat("application/pdf");
+        when(ucm.getDocumentInfo("DOC-OK")).thenReturn(info);
+        when(ucm.getDocumentInfo("DOC-GONE")).thenReturn(null);
+
+        // second doc missing -> whole request rejected before a single download
+        assertThrows(DocumentNotFoundException.class,
+                () -> service.prepareZipDocs(Arrays.asList("DOC-OK", "DOC-GONE")));
+        verify(ucm, never()).download(anyString());
+    }
+
+    @Test
+    void writeZipEntries_streamsSameContentAsBufferedV1() throws Exception {
+        byte[] payloadA = randomPayload(2048);
+        byte[] payloadB = randomPayload(4096);
+        stubExistingDocument("DOC-A", "alpha.pdf", "application/pdf", payloadA);
+        stubExistingDocument("DOC-B", "beta.pdf", "application/pdf", payloadB);
+
+        // v2 path: prepare + stream to an arbitrary output stream
+        List<ZipDocEntry> entries = service.prepareZipDocs(Arrays.asList("DOC-A", "DOC-B"));
+        java.io.ByteArrayOutputStream streamed = new java.io.ByteArrayOutputStream();
+        service.writeZipEntries(entries, streamed);
+
+        Map<String, byte[]> zipEntries = unzip(streamed.toByteArray());
+        assertEquals(2, zipEntries.size());
+        assertArrayEquals(payloadA, zipEntries.get("1-alpha.pdf"));
+        assertArrayEquals(payloadB, zipEntries.get("2-beta.pdf"));
     }
 
     // ------------------------------------------------------------------
