@@ -147,8 +147,14 @@ public class UCMUtilities implements IContent {
 
     public String upload(String contentId, String contentType, String filename, InputStream inputStream,
                          Map<String, Object> customAttributes) throws CheckInException, IOException, Exception {
+        // legacy behaviour: available() as length — only correct for fully in-memory streams
+        return upload(contentId, contentType, filename, inputStream, inputStream.available(), customAttributes);
+    }
+
+    public String upload(String contentId, String contentType, String filename, InputStream inputStream,
+                         long contentLength, Map<String, Object> customAttributes) throws CheckInException, IOException, Exception {
         return checkInDocument(resolveDocName(contentType, contentId), contentType + " for " + contentId, contentType, "DSharjahGroup", inputStream,
-                               filename, customAttributes);
+                               contentLength, filename, customAttributes);
     }
 
     public UCMDocument getDocumentInfo(String contentId) {
@@ -507,7 +513,7 @@ public class UCMUtilities implements IContent {
     }
 
     private String checkInDocument(String documentName, String documentTitle, String documentType, String securityGroup,
-                                   InputStream primaryFile, String documentFileName,
+                                   InputStream primaryFile, long contentLength, String documentFileName,
                                    Map<String, Object> customMetadata) throws IOException, Exception {
         try {
             DataBinder dataBinder = idcClient.createBinder();
@@ -518,7 +524,7 @@ public class UCMUtilities implements IContent {
             }
             dataBinder.putLocal("dDocType", documentType);
             dataBinder.putLocal("dSecurityGroup", securityGroup);
-            dataBinder.addFile("primaryFile", new TransferFile(primaryFile, documentFileName, primaryFile.available()));
+            dataBinder.addFile("primaryFile", new TransferFile(primaryFile, documentFileName, contentLength));
             dataBinder.putLocal("dDocAccount", "");
             if (customMetadata != null) {
                 for (String s : customMetadata.keySet()) {
@@ -538,9 +544,6 @@ public class UCMUtilities implements IContent {
             }
         } catch (IdcClientException e) {
             logger.error("UCM check-in failed for document {}", documentName, e);
-            throw e;
-        } catch (IOException e) {
-            logger.error("IO error during check-in of document {}", documentName, e);
             throw e;
         }
     }

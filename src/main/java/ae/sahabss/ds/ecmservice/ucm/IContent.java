@@ -11,6 +11,12 @@ public interface IContent {
 
     public String upload(String contentId, String contentType, String filename, InputStream inputStream, Map<String, Object> customAttributes) throws TechnicalException, IOException, Exception;
 
+    /**
+     * Streaming variant: the caller supplies the content length explicitly
+     * (InputStream.available() is only correct for in-memory streams).
+     */
+    public String upload(String contentId, String contentType, String filename, InputStream inputStream, long contentLength, Map<String, Object> customAttributes) throws TechnicalException, IOException, Exception;
+
     public InputStream download(String contentId);
 
     UCMDocument getDocumentInfo(String contentId);

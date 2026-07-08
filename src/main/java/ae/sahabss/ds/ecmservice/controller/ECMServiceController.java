@@ -7,6 +7,7 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
 
 import java.util.List;
 
@@ -68,7 +69,7 @@ public class ECMServiceController {
     }
 
     @PostMapping("/v2/downloadDocsByIds")
-    public ResponseEntity<Object> downloadDocsByIdsV2(@RequestBody List<String> docIdsList) {
+    public ResponseEntity<StreamingResponseBody> downloadDocsByIdsV2(@RequestBody List<String> docIdsList) {
         return ecmServiceControllerWrapper.downloadDocsByIdsV2(docIdsList);
     }
 
