@@ -28,6 +28,12 @@
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
 
+        <!-- Health / readiness endpoint for standalone deployment monitoring -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+
         <!-- JdbcTemplate for the aid-request TRANSACTION_SEQ -> ENTITY_REQ_ID lookup -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

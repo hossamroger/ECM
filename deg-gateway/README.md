@@ -89,6 +89,17 @@ java -jar target/deg-gateway.war \
 # or deploy target/deg-gateway.war to WebLogic / Tomcat
 ```
 
+This is a **self-contained application**: the WAR embeds Tomcat, so `java -jar`
+runs it standalone with no external server, and it also deploys to an external
+container (WebLogic/Tomcat) via `ServletInitializer`. It boots with the bundled
+defaults and needs no other service to start.
+
+Health endpoint for monitoring/readiness (relative to the context path):
+
+```
+GET /online/shjsocialdeptservices/actuator/health   ->  {"status":"UP"}
+```
+
 ## Tests
 
 `mvn test` — the suite uses Spring's `MockRestServiceServer` and standalone
